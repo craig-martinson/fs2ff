@@ -3,7 +3,7 @@
 using fs2ff.Models;
 using Microsoft.FlightSimulator.SimConnect;
 using System;
-using System.Diagnostics;
+using System.Diagnostics; // Added
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
@@ -58,21 +58,22 @@ namespace fs2ff.SimConnect
         {
             try
             {
+                Debug.WriteLine("[SimConnectAdapter] Attempting connection to SimConnect.");
                 UnsubscribeEvents();
 
                 _simConnect?.Dispose();
 
                 _simConnect = new SimConnectImpl(AppName, hwnd, WM_USER_SIMCONNECT, null, 0);
-                //// TODO: Remove this
-                //_attitudeTimer = new Timer(RequestAttitudeData, null, 100, 1000 / attitudeFrequency);
 
                 SubscribeEvents();
 
+                Debug.WriteLine("[SimConnectAdapter] Connected to SimConnect.");
                 StateChanged?.Invoke(FlightSimState.Connected);
             }
             catch (COMException e)
             {
                 Console.Error.WriteLine("Exception caught: " + e);
+                Debug.WriteLine($"[SimConnectAdapter] Connection failed: {e.Message}");
                 StateChanged?.Invoke(FlightSimState.ErrorOccurred);
             }
         }
@@ -196,9 +197,14 @@ namespace fs2ff.SimConnect
         {
             UnsubscribeEvents();
 
+            if (_simConnect != null)
+            {
+                Debug.WriteLine("[SimConnectAdapter] Disposing SimConnect instance.");
+            }
             _simConnect?.Dispose();
             _simConnect = null;
 
+            Debug.WriteLine($"[SimConnectAdapter] State changed to {state}.");
             StateChanged?.Invoke(state);
         }
 
@@ -250,6 +256,7 @@ namespace fs2ff.SimConnect
             AddToDataDefinition(DEFINITION.Traffic, "VELOCITY WORLD Y", "Feet per minute");
             AddToDataDefinition(DEFINITION.Traffic, "SIM ON GROUND", "Bool", SIMCONNECT_DATATYPE.INT32);
             AddToDataDefinition(DEFINITION.Traffic, "PLANE HEADING DEGREES TRUE", "Degrees");
+            AddToDataDefinition(DEFINITION.Traffic, "GPS GROUND TRUE TRACK", "Degrees");
             AddToDataDefinition(DEFINITION.Traffic, "GROUND VELOCITY", "Knots");
             AddToDataDefinition(DEFINITION.Traffic, "ATC ID", null, SIMCONNECT_DATATYPE.STRING64);
             AddToDataDefinition(DEFINITION.Traffic, "ATC AIRLINE", null, SIMCONNECT_DATATYPE.STRING64);
@@ -282,6 +289,7 @@ namespace fs2ff.SimConnect
                  data.eObjType == SIMCONNECT_SIMOBJECT_TYPE.HELICOPTER) &&
                 data.dwData != ownship_id)
             {
+                Debug.WriteLine($"[SimConnectAdapter] Object add event (Obj={data.dwData}) subscribing traffic (rate={DefaultTrafficRate}).");
                 _simConnect?.RequestDataOnSimObject(
                     REQUEST.TrafficObjectBase + data.dwData,
                     DEFINITION.Traffic, data.dwData,
@@ -299,6 +307,7 @@ namespace fs2ff.SimConnect
         private void SimConnect_OnRecvException(SimConnectImpl sender, SIMCONNECT_RECV_EXCEPTION data)
         {
             Console.Error.WriteLine("Exception caught: " + data.dwException);
+            Debug.WriteLine($"[SimConnectAdapter] SimConnect exception: {data.dwException}");
             DisconnectInternal(FlightSimState.ErrorOccurred);
         }
 
@@ -309,6 +318,7 @@ namespace fs2ff.SimConnect
         /// <param name="data"></param>
         private void SimConnect_OnRecvOpen(SimConnectImpl sender, SIMCONNECT_RECV data)
         {
+            Debug.WriteLine("[SimConnectAdapter] SimConnect open event received. Registering data definitions.");
             RegisterPositionStruct();
             RegisterAttitudeStruct();
             RegisterTrafficStruct();
@@ -319,11 +329,6 @@ namespace fs2ff.SimConnect
 
             _simConnect?.SubscribeToSystemEvent(EVENT.ObjectAdded, "ObjectAdded");
             _simConnect?.SubscribeToSystemEvent(EVENT.SixHz, "6Hz");
-
-            // TODO: will use the Airport data for setting up FIS-B weather reports These are broken right now,
-            // they return the same 1234 airports 31 times.
-            // _simConnect?.RequestFacilitiesList(SIMCONNECT_FACILITY_LIST_TYPE.AIRPORT, REQUEST.Airport);
-            //_simConnect?.SubscribeToFacilities(SIMCONNECT_FACILITY_LIST_TYPE.AIRPORT, REQUEST.Airport);
         }
 
         /// <summary>
@@ -333,6 +338,7 @@ namespace fs2ff.SimConnect
         /// <param name="data"></param>
         private void SimConnect_OnRecvQuit(SimConnectImpl sender, SIMCONNECT_RECV data)
         {
+            Debug.WriteLine("[SimConnectAdapter] Quit event received.");
             DisconnectInternal(FlightSimState.Quit);
         }
 
@@ -354,7 +360,7 @@ namespace fs2ff.SimConnect
                 data.dwDefineID == (uint)DEFINITION.Position &&
                 data.dwData?.FirstOrDefault() is PositionData pd)
             {
-                // This event is only ever received for ownship. We assume that the object id we get here identifies our aircraft.
+                Debug.WriteLine($"[SimConnectAdapter] Position data received (Obj={dwObjectID}). Lat={pd.Latitude:0.#####} Lon={pd.Longitude:0.#####}");
                 UpdateOwnshipID(dwObjectID);
                 var pos = new Position(pd, dwObjectID);
                 await PositionReceived.RaiseAsync(pos).ConfigureAwait(false);
@@ -365,6 +371,7 @@ namespace fs2ff.SimConnect
                 data.dwDefineID == (uint)DEFINITION.Attitude &&
                 data.dwData?.FirstOrDefault() is Attitude att)
             {
+                Debug.WriteLine($"[SimConnectAdapter] Attitude data received (Obj={dwObjectID}). Heading={att.TrueHeading:0.##}");
                 await AttitudeReceived.RaiseAsync(att).ConfigureAwait(false);
                 return;
             }
@@ -374,11 +381,12 @@ namespace fs2ff.SimConnect
             {
                 if (data.dwData?.FirstOrDefault() is TrafficData od)
                 {
+                    Debug.WriteLine("[SimConnectAdapter] Owner traffic data received.");
                     await OwnerReceived.RaiseAsync(new Traffic(od, Gdl90Traffic.SelfIaco, OBJECT_ID_USER_RESULT)).ConfigureAwait(false);
                     return;
                 }
 
-                Debug.WriteLine($"Invalid ownship traffic report for id {dwObjectID}");
+                Debug.WriteLine($"[SimConnectAdapter] Invalid ownship traffic report for id {dwObjectID}");
                 return;
             }
 
@@ -390,41 +398,33 @@ namespace fs2ff.SimConnect
                 {
                     return;
                 }
-                // Prevents all the parked aircraft from showing up on ADS-B
-                // Modified to work better with VATSIM since it doesn't report Transponder state
                 if (!ViewModelLocator.Main.DataHideTrafficEnabled || !td.OnGround || td.TransponderState != TransponderState.Off || td.LightBeaconOn)
                 {
                     try
                     {
+                        Debug.WriteLine($"[SimConnectAdapter] Traffic data received (Obj={dwObjectID}). Alt={td.Altitude} GS={td.GroundVelocity}");
                         await TrafficReceived.RaiseAsync(new Traffic(td, data.dwRequestID, data.dwRequestID)).ConfigureAwait(false);
                     }
                     catch (Exception ex)
                     {
-                        // been getting some bad traffic lately just extra protection
                         Console.Error.WriteLine($"Exception: {ex}");
                     }
                 }
-
                 return;
             }
 
-            Debug.WriteLine($"Unhandled event: {data.dwID}");
+            Debug.WriteLine($"[SimConnectAdapter] Unhandled event: {data.dwID} Req={data.dwRequestID} Def={data.dwDefineID}");
         }
 
         private void UpdateOwnshipID(uint dwObjectID)
         {
             if (ownship_id != dwObjectID)
             {
-                Debug.WriteLine($"Ownship is {dwObjectID}");
+                Debug.WriteLine($"[SimConnectAdapter] Ownship updated to {dwObjectID}");
                 ownship_id = dwObjectID;
             }
         }
 
-        /// <summary>
-        /// Gets called anytime a new object (Aircraft, etc.) is added to the sim.
-        /// </summary>
-        /// <param name="sender"></param>
-        /// <param name="data"></param>
         private void SimConnect_OnRecvSimObjectDataByType(SimConnectImpl sender, SIMCONNECT_RECV_SIMOBJECT_DATA_BYTYPE data)
         {
             var dwObjectID = data.dwObjectID;
@@ -433,6 +433,7 @@ namespace fs2ff.SimConnect
                 data.dwDefineID == (uint)DEFINITION.Traffic &&
                 dwObjectID != ownship_id)
             {
+                Debug.WriteLine($"[SimConnectAdapter] New object detected (Obj={dwObjectID}) requesting traffic stream.");
                 _simConnect?.RequestDataOnSimObject(
                     REQUEST.TrafficObjectBase + dwObjectID,
                     DEFINITION.Traffic, dwObjectID,
@@ -455,8 +456,6 @@ namespace fs2ff.SimConnect
                 _simConnect.OnRecvSimobjectData += SimConnect_OnRecvSimObjectData;
                 _simConnect.OnRecvSimobjectDataBytype += SimConnect_OnRecvSimObjectDataByType;
                 _simConnect.OnRecvEventObjectAddremove += SimConnect_OnRecvEventObjectAddRemove;
-                //                _simConnect.OnRecvAirportList += _simConnect_OnRecvAirportList;
-                //                _simConnect.OnRecvCloudState += _simConnect_OnRecvCloudState;
             }
         }
 
@@ -473,31 +472,8 @@ namespace fs2ff.SimConnect
                 _simConnect.OnRecvException -= SimConnect_OnRecvException;
                 _simConnect.OnRecvQuit -= SimConnect_OnRecvQuit;
                 _simConnect.OnRecvOpen -= SimConnect_OnRecvOpen;
-                //                _simConnect.OnRecvAirportList -= _simConnect_OnRecvAirportList;
-                //                _simConnect.OnRecvCloudState += _simConnect_OnRecvCloudState;
             }
         }
-
-        //TODO: this is future work on FIS-B I'll implement at some point
-        //private void _simConnect_OnRecvCloudState(SimConnectImpl sender, SIMCONNECT_RECV_CLOUD_STATE data)
-        //{
-        //    Debug.WriteLine($"Data: {data.dwArraySize}");
-        //}
-
-        //private Dictionary<string, SIMCONNECT_DATA_FACILITY_AIRPORT> airports = new Dictionary<string, SIMCONNECT_DATA_FACILITY_AIRPORT>();
-        //private void _simConnect_OnRecvAirportList(SimConnectImpl sender, SIMCONNECT_RECV_AIRPORT_LIST data)
-        //{
-        //    Debug.WriteLine($"Data: {data.dwArraySize}");
-        //    var owner = ViewModelLocator.Main.OwnerInfo;
-        //    foreach (SIMCONNECT_DATA_FACILITY_AIRPORT airport in data.rgData)
-        //    {
-        //        airports.TryAdd(airport.Icao, airport);
-        //        if (Math.Round(airport.Latitude) == Math.Round(owner.Latitude) && Math.Round(airport.Longitude) == Math.Round(owner.Longitude))
-        //        {
-        //            _simConnect?.WeatherRequestCloudState(REQUEST.Weather, (float)airport.Latitude - 1, (float)airport.Longitude + 1, 100, (float)airport.Latitude + 1, (float)airport.Longitude + 1, 10000, 0);
-        //        }
-        //    }
-        //}
-
+        // ...existing code...
     }
 }

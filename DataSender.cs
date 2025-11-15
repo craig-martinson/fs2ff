@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading.Tasks;
+using System.Diagnostics; // Added
 
 namespace fs2ff
 {
@@ -20,6 +21,16 @@ namespace fs2ff
 
         private List<IPEndPoint> _endPoints = new List<IPEndPoint>();
         private Socket? _socket;
+
+        // Debug counters
+        private long _attitudePackets;
+        private long _positionPackets;
+        private long _trafficPackets;
+        private long _heartbeatPackets;
+        private long _deviceStatusPackets;
+        private long _ownerPackets;
+        private long _rawStringPackets;
+        private long _rawBytePackets;
 
         /// <summary>
         /// Binds to a socket for transmission
@@ -37,55 +48,68 @@ namespace fs2ff
             }
 
             _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            Debug.WriteLine($"[DataSender] Socket bound for {(_endPoints.Count == 0 ? "NO" : _endPoints.Count.ToString())} endpoints on port {port}. GDL90={ViewModelLocator.Main.DataGdl90Enabled}");
         }
 
-        public void Disconnect() => _socket?.Dispose();
+        public void Disconnect()
+        {
+            if (_socket != null)
+            {
+                Debug.WriteLine("[DataSender] Disconnecting socket.");
+            }
+            _socket?.Dispose();
+            _socket = null;
+        }
 
         public void Dispose() => _socket?.Dispose();
 
         /// <summary>
         /// Converts and sends an Attitude update packet
         /// </summary>
-        /// <param name="a"></param>
-        /// <returns></returns>
         public async Task Send(Attitude a)
         {
+            Debug.WriteLine($"[DataSender] Sending Attitude packet. GDL90={ViewModelLocator.Main.DataGdl90Enabled}, Stratux={ViewModelLocator.Main.DataStratuxEnabled}");
+            
             if (ViewModelLocator.Main.DataGdl90Enabled)
             {
                 if (ViewModelLocator.Main.DataStratuxEnabled)
                 {
+                    Debug.WriteLine("[DataSender] → Using Gdl90Ahrs (full AHRS format)");
                     var ahrs = new Gdl90Ahrs(a);
                     var data = ahrs.ToGdl90Message();
+                    Debug.WriteLine($"[DataSender] → GDL90 message size after framing: {data.Length} bytes");
                     await Send(data).ConfigureAwait(false);
                 }
                 else
                 {
+                    Debug.WriteLine("[DataSender] → Using Gdl90FfmAhrs (ForeFlight compact format)");
                     var ffAhrs = new Gdl90FfmAhrs(a);
                     var data = ffAhrs.ToGdl90Message();
+                    Debug.WriteLine($"[DataSender] → GDL90 message size after framing: {data.Length} bytes");
                     await Send(data).ConfigureAwait(false);
                 }
             }
             else
             {
-                // Using a slip value between -127 and +127. .005 converts GP to be similar to the in game G1000 slip indicator
+                // X-Plane XATT format: heading, pitch, roll values
+                // Note: MSFS provides positive pitch=nose up, but X-Plane expects negative for nose up
                 var slipDeg = a.SkidSlip * -0.005;
                 var data = string.Format(CultureInfo.InvariantCulture,
                     $"XATT{SimId},{a.TrueHeading:0.##},{-a.Pitch:0.##},{-a.Bank:0.##},,,{a.TurnRate:0.##},,,,{slipDeg:0.###},,");
 
+                Debug.WriteLine($"[DataSender] → Using XATT format: {data}");
                 await Send(data).ConfigureAwait(false);
             }
+            Debug.WriteLine($"[DataSender] Attitude packet sent. Total attitude packets: {++_attitudePackets}");
         }
 
         /// <summary>
         /// Converts and sends a Position packet
         /// </summary>
-        /// <param name="p"></param>
-        /// <returns></returns>
         public async Task Send(Position p)
         {
             if (!ViewModelLocator.Main.DataGdl90Enabled)
             {
-
                 var data = string.Format(CultureInfo.InvariantCulture,
                 "XGPS{0},{1:0.#####},{2:0.#####},{3:0.##},{4:0.###},{5:0.##}",
                 SimId, p.Pd.Longitude, p.Pd.Latitude, p.Pd.AltitudeMeters, p.Pd.GroundTrack, p.Pd.GroundSpeedMps);
@@ -98,18 +122,17 @@ namespace fs2ff
                 var data = geoAlt.ToGdl90Message();
                 await Send(data).ConfigureAwait(false);
             }
+            Debug.WriteLine($"[DataSender] Position packet sent. Total position packets: {++_positionPackets}");
         }
 
         /// <summary>
-        /// Converts and sends a traffic packet. This can also be an Ownership report to the EFB
+        /// Converts and sends a traffic packet.
         /// </summary>
-        /// <param name="t"></param>
-        /// <param name="id"></param>
-        /// <returns></returns>
         public async Task Send(Traffic t)
         {
             if (!t.IsValid())
             {
+                Debug.WriteLine("[DataSender] Ignored invalid traffic packet.");
                 return;
             }
 
@@ -128,13 +151,19 @@ namespace fs2ff
 
                 await Send(data).ConfigureAwait(false);
             }
+            if (t.IsOwner)
+            {
+                Debug.WriteLine($"[DataSender] Owner traffic packet sent. Total owner packets: {++_ownerPackets}");
+            }
+            else
+            {
+                Debug.WriteLine($"[DataSender] Traffic packet sent (id={t.ObjId}). Total traffic packets: {++_trafficPackets}");
+            }
         }
 
         /// <summary>
         /// Encodes and sends a string
         /// </summary>
-        /// <param name="data"></param>
-        /// <returns></returns>
         private async Task Send(string data)
         {
             if (_socket != null)
@@ -146,14 +175,17 @@ namespace fs2ff
                         .SendToAsync(byteData, SocketFlags.None, endPoint)
                         .ConfigureAwait(false);
                 }
+                Debug.WriteLine($"[DataSender] Raw string packet ({data.Length} chars) sent to {_endPoints.Count} endpoints. Total raw string packets: {++_rawStringPackets}");
+            }
+            else
+            {
+                Debug.WriteLine("[DataSender] Attempted to send string but socket is null.");
             }
         }
 
         /// <summary>
-        /// Sends the give byte array
+        /// Sends the given byte array
         /// </summary>
-        /// <param name="data"></param>
-        /// <returns></returns>
         public async Task Send(byte[] data)
         {
             if (_socket != null)
@@ -164,17 +196,30 @@ namespace fs2ff
                         .SendToAsync(data, SocketFlags.None, endPoint)
                         .ConfigureAwait(false);
                 }
+                Debug.WriteLine($"[DataSender] Raw byte packet ({data.Length} bytes) sent to {_endPoints.Count} endpoints. Total raw byte packets: {++_rawBytePackets}");
+            }
+            else
+            {
+                Debug.WriteLine("[DataSender] Attempted to send bytes but socket is null.");
             }
         }
 
-        /// <summary>
-        /// If the plane has an airline ID then use that has the flight
-        /// </summary>
-        /// <param name="t"></param>
-        /// <returns></returns>
         private static string? TryGetFlightNumber(Traffic t) =>
             !string.IsNullOrEmpty(t.Td.Airline) && !string.IsNullOrEmpty(t.Td.FlightNumber)
                 ? $"{t.Td.Airline} {t.Td.FlightNumber}"
                 : null;
+
+        /// <summary>
+        /// Used by timers to mark heartbeat/device packets
+        /// </summary>
+        public void MarkHeartbeatSent()
+        {
+            Debug.WriteLine($"[DataSender] Heartbeat sent. Total heartbeats: {++_heartbeatPackets}");
+        }
+
+        public void MarkDeviceStatusSent()
+        {
+            Debug.WriteLine($"[DataSender] Device status sent. Total device status packets: {++_deviceStatusPackets}");
+        }
     }
 }

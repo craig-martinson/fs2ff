@@ -549,6 +549,7 @@ namespace fs2ff
         {
             if (DataAttitudeEnabled)
             {
+                Debug.WriteLine($"[MainViewModel] Attitude received. Heading={att.TrueHeading:0.##} Pitch={att.Pitch:0.##} Bank={att.Bank:0.##}");
                 await _dataSender.Send(att).ConfigureAwait(false);
             }
         }
@@ -577,16 +578,19 @@ namespace fs2ff
             {
                 return;
             }
+            Debug.WriteLine("[MainViewModel] GDL90 heartbeat timer tick.");
 
             var hb = new Gdl90Heartbeat();
             var data = hb.ToGdl90Message();
             await _dataSender.Send(data).ConfigureAwait(false);
+            _dataSender.MarkHeartbeatSent();
 
             if (ViewModelLocator.Main.DataStratuxEnabled)
             {
                 var shb = new Gdl90StratuxHeartbeat();
                 data = shb.ToGdl90Message();
                 await _dataSender.Send(data).ConfigureAwait(false);
+                _dataSender.MarkHeartbeatSent();
             }
         }
 
@@ -600,40 +604,43 @@ namespace fs2ff
             {
                 return;
             }
+            Debug.WriteLine("[MainViewModel] Device status timer tick.");
 
             if (ViewModelLocator.Main.DataStratusEnabled)
             {
                 var status = new Gdl90StratusStatus();
                 await _dataSender.Send(status.ToGdl90Message()).ConfigureAwait(false);
+                _dataSender.MarkDeviceStatusSent();
             }
 
             if (ViewModelLocator.Main.DataStratuxEnabled)
             {
                 var stratux = new Gdl90StratuxStatus();
                 await _dataSender.Send(stratux.ToGdl90Message()).ConfigureAwait(false);
+                _dataSender.MarkDeviceStatusSent();
             }
 
             var ffmId = new Gdl90FfmId();
             await _dataSender.Send(ffmId.ToGdl90Message()).ConfigureAwait(false);
+            _dataSender.MarkDeviceStatusSent();
         }
 
         private async Task SimConnectPositionReceived(Position pos)
         {
             if (DataPositionEnabled && pos.IsValid())
             {
+                Debug.WriteLine($"[MainViewModel] Position received. Lat={pos.Pd.Latitude:0.#####} Lon={pos.Pd.Longitude:0.#####} Alt(m)={pos.Pd.AltitudeMeters:0.##}");
                 await _dataSender.Send(pos).ConfigureAwait(false);
             }
         }
 
         private async Task SimConnectTrafficReceived(Traffic tfk)
         {
-            // Ignore traffic with id=1, that's our own aircraft
             if (DataTrafficEnabled && !tfk.IsOwner)
             {
                 bool send = true;
                 if (OwnerInfo.IsValid())
                 {
-                    // MSFS Traffic Request bubble isn't so good. It will either do < 10nm or <60nm doesn't seem to do any less than that.
                     var curRadius = TrafficRadiusNm.NmToMeters();
                     var distance = OwnerInfo.Td.DistanceMeters(tfk.Td);
                     if (Convert.ToUInt32(distance.Horizontal) > curRadius)
@@ -644,7 +651,12 @@ namespace fs2ff
 
                 if (send)
                 {
+                    Debug.WriteLine($"[MainViewModel] Traffic received. Id={tfk.ObjId} Alt={tfk.Td.Altitude} GS={tfk.Td.GroundVelocity} OnGround={tfk.Td.OnGround}");
                     await _dataSender.Send(tfk).ConfigureAwait(false);
+                }
+                else
+                {
+                    Debug.WriteLine($"[MainViewModel] Traffic ignored (outside radius). Id={tfk.ObjId}");
                 }
             }
         }
@@ -652,6 +664,7 @@ namespace fs2ff
         private async Task SimConnectOwnerReceived(Traffic tfk)
         {
             OwnerInfo = tfk;
+            Debug.WriteLine($"[MainViewModel] Owner traffic received. Alt={tfk.Td.Altitude} GS={tfk.Td.GroundVelocity}");
             if (DataGdl90Enabled)
             {
                 await _dataSender.Send(tfk).ConfigureAwait(false);

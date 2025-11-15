@@ -65,13 +65,25 @@ namespace fs2ff.Models
             Msg[11] = (byte)((alt & 0xFF0) >> 4);
             Msg[12] = (byte)((alt & 0x00F) << 4);
 
-            Msg[12] |= 0x01;
+            // Misc indicators (byte 12, bits 7-4)
+            // Bit 7: Reserved (0)
+            // Bit 6: Reserved (0)
+            // Bit 5: Reserved (0)
+            // Bit 4: Reserved (0)
+            // Bit 3: Airborne/Extrapolated (1 if airborne)
+            // Bits 2-1: TT (Track Type): 00 = True Track Angle
+            // Bit 0: Report Type: 1 for updated position
+            
+            Msg[12] |= 0x01; // Report type = updated position
+
+            // Set TT field to 00 (True Track Angle) - bits 2-1 already 0
+            // This indicates we're providing true ground track in byte 17
 
             // MSFS has a desire to show stationary planes on not on ground
             // VATSIM likes to have some jitter and not put the plane on the ground
             if (!td.OnGround && td.AltAboveGroundCG > 10 && (td.GroundVelocity != 0 || td.VerticalSpeed != 0))
             {
-                Msg[12] = (byte)(Msg[12] | 1 << 3);
+                Msg[12] = (byte)(Msg[12] | 1 << 3); // Set airborne bit
 
                 if (!isOwner && owner.IsAlertable(traffic))
                 {
@@ -94,9 +106,12 @@ namespace fs2ff.Models
             Msg[15] |= (byte)((verticalVelocity & 0x0F00) >> 8);
             Msg[16] = (byte)(verticalVelocity & 0x00FF);
 
-            // Truncate Heading to 359 to not overflow the convert below
-            var trk = Math.Min(td.TrueHeading, 359);
-            // Heading is 360/256 to fit into 1 byte
+            // Track angle (byte 17) - Use GPS Ground Track, not True Heading
+            // Per GDL90 spec: "Track/Heading" field should contain ground track for navigation
+            // Resolution: 360/256 = 1.40625 degrees per LSB
+            // Truncate to 359 to not overflow the convert below
+            var trk = Math.Min(td.GroundTrack, 359);
+            // Track is 360/256 to fit into 1 byte
             trk /= Gdl90Util.TRACK_RESOLUTION;
             Msg[17] = Convert.ToByte(trk);
 

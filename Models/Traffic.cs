@@ -50,6 +50,7 @@ namespace fs2ff.Models
         public double VerticalSpeed;
         public bool OnGround;
         public double TrueHeading;
+        public double GroundTrack;
         public double GroundVelocity;
 
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)]
